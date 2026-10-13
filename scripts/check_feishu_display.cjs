@@ -16,10 +16,12 @@ const root = path.resolve(__dirname, '..');
       fs.writeFileSync(bundle, await response.body());
       await request.close();
     }
+    const businessOnly = process.argv.includes('--business');
     if (!fs.existsSync(bundle)) throw new Error('Run once with --fetch-chart to cache the public chart bundle.');
     const directory = path.join(root, '.local/feishu-display');
-    const files = fs.readdirSync(directory).filter(f=>f.endsWith('.html'));
-    if (files.length < 13) throw new Error('Generate synthetic fixtures first.');
+    const businessNames = new Set(['growth', 'growth_quantity', 'price', 'margin', 'inventory_risk', 'stocking', 'business_combined']);
+    const files = fs.readdirSync(directory).filter(f=>f.endsWith('.html') && (!businessOnly || businessNames.has(f.replace('.html', ''))));
+    if (files.length < (businessOnly ? businessNames.size : 13)) throw new Error('Generate synthetic fixtures first.');
     let captures=0;
     for (const file of files) {
       for (const [label, width] of [['desktop',920],['mobile',390]]) {
@@ -39,6 +41,7 @@ const root = path.resolve(__dirname, '..');
         }
         await page.locator('details').evaluateAll(nodes=>nodes.forEach(n=>n.open=true));
         if (await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth)) throw new Error(file+': expanded overflow');
+        if (businessOnly) await page.screenshot({path:path.join(directory,file.replace('.html',`-${label}-expanded.png`)),fullPage:true});
         await page.close(); captures++;
       }
     }

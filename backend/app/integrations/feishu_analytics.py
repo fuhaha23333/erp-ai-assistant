@@ -46,16 +46,27 @@ def question_payload(question: str, today: date) -> dict:
 
 
 def _save(store, job, payload):
+    if job["payload"].get("reply_to_message_id"):
+        payload = dict(payload, reply_to_message_id=job["payload"]["reply_to_message_id"])
     if not store.replace_payload(job, payload):
         raise QueryUnavailable("任务已被重新领取，请重新提问。")
     job["payload"] = payload
 
 
-def _store_result(result, payload):
-    card, text = render_analysis(result, conversation_notice=round_notice(payload))
-    # Plotly figures are for the web; Feishu gets tabular facts and evidence IDs.
+def _store_result(result, payload, job=None):
+    from app.integrations.feishu_card_actions import controls, definitions
+
+    actions = definitions(result) if job and not conversation_closed(payload) else {}
+    card, text = render_analysis(result, conversation_notice=round_notice(payload),
+                                 action_elements=controls(actions, job) if actions else [])
+    # Plotly stays on the web; Feishu gets native charts, exact facts and evidence IDs.
     stored = result.model_dump(mode="json", exclude={"results": {"__all__": {"chart"}}})
     stored["reply_card"] = card
+    if actions:
+        from app.semantic.catalog import load_catalog
+
+        stored["card_actions"] = actions
+        stored["card_action_catalog"] = load_catalog()["version"]
     return stored, text
 
 
@@ -136,11 +147,16 @@ def _answer_guided(job, store, report, planner, original, previous, key, convers
         **common, "kind": "analysis", "plan": result.plan.model_dump(mode="json"),
         "interpretation": result.interpretation,
     })
-    return _store_result(result, job["payload"])
+    return _store_result(result, job["payload"], job)
 
 
 def answer_analysis(job, store, report_loader, planner):
     payload = job["payload"]
+    if payload["kind"] == "card_action":
+        from app.integrations.feishu_card_actions import action_payload
+
+        _save(store, job, action_payload(job, store, report_loader()))
+        payload = job["payload"]
     if payload["kind"] == "semantic_notice":
         # Safe recovery after persisting the decision but before persisting its reply.
         if payload.get("guided") or payload.get("dialogue_turn"):
@@ -240,4 +256,4 @@ def answer_analysis(job, store, report_loader, planner):
         _save(store, job, payload)
     result = execute_analysis(report, AnalysisPlan.model_validate(payload["plan"]))
     result = result.model_copy(update={"interpretation": payload["interpretation"]})
-    return _store_result(result, payload)
+    return _store_result(result, payload, job)

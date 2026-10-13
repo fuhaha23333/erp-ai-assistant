@@ -151,10 +151,14 @@ class SqlJobStore:
         ).hexdigest()
         lock_key = hashlib.sha256(f"{self.app_id}|{self.tenant_key}".encode()).hexdigest()
         with self.connection() as connection:
+            is_callback = payload.get("kind") == "card_action"
+            if is_callback:
+                connection.timeout = 2
             lock = connection.execute(
                 "DECLARE @r int; EXEC @r = sys.sp_getapplock @Resource=?, "
-                "@LockMode='Exclusive', @LockOwner='Transaction', @LockTimeout=5000; SELECT @r",
+                "@LockMode='Exclusive', @LockOwner='Transaction', @LockTimeout=?; SELECT @r",
                 "feishu-enqueue-" + lock_key,
+                500 if is_callback else 5000,
             ).fetchone()[0]
             if lock < 0:
                 raise JobStoreError("任务队列暂忙")
@@ -188,6 +192,9 @@ class SqlJobStore:
                 is not None
             )
             reply = "你有一个查询正在处理，请等结果返回后再提问。" if busy else None
+            stored_payload = {"kind": "busy"} if busy else payload
+            if busy and is_callback:
+                stored_payload["reply_to_message_id"] = payload["reply_to_message_id"]
             connection.execute(
                 "INSERT INTO erp_ai.feishu_sales_jobs "
                 "(job_id,app_id,tenant_key,chat_id,user_open_id,message_id,event_id,status,"
@@ -200,11 +207,27 @@ class SqlJobStore:
                 identity["message_id"],
                 identity["event_id"],
                 "ready" if busy else "queued",
-                json.dumps({"kind": "busy"} if busy else payload, ensure_ascii=False),
+                json.dumps(stored_payload, ensure_ascii=False),
                 reply,
             )
             connection.commit()
             return "busy" if busy else "queued"
+
+    def latest_card_action_source(self, job: dict) -> dict | None:
+        from app.integrations.feishu_card_actions import latest_action_source
+
+        with self.connection() as connection:
+            cursor = connection.execute(
+                "SELECT TOP (1) * FROM erp_ai.feishu_sales_jobs "
+                "WHERE app_id=? AND tenant_key=? AND chat_id=? AND user_open_id=? "
+                "AND created_at<=? AND job_id<>? "
+                "AND JSON_VALUE(payload_json,'$.kind') NOT IN ('help','coverage','ping') "
+                "ORDER BY created_at DESC,job_id DESC",
+                self.app_id, self.tenant_key, job["chat_id"], job["user_open_id"],
+                job["created_at"], job["job_id"],
+            )
+            source = self._job(cursor)
+        return latest_action_source([source] if source else [], job["created_at"])
 
     @staticmethod
     def _job(cursor):
@@ -291,19 +314,29 @@ class SqlJobStore:
             connection.commit()
             return job
 
-    def mark(self, job_id: str, status: str, error_code: int | None = None):
+    def mark(self, job_id: str, status: str, error_code: int | None = None,
+             *, reply_message_id: str | None = None):
         if status not in {"sent", "rejected", "unknown", "revoked", "failed"}:
             raise JobStoreError("非法任务状态")
         if error_code is not None and type(error_code) is not int:
             raise JobStoreError("错误码必须为整数")
+        if reply_message_id is not None and (
+            status != "sent" or not isinstance(reply_message_id, str)
+            or not 0 < len(reply_message_id) <= 200
+        ):
+            raise JobStoreError("回复消息标识无效")
         with self.connection() as connection:
             connection.execute(
                 "UPDATE erp_ai.feishu_sales_jobs SET status=?,error_code=?, "
+                "result_json=CASE WHEN ? IS NULL THEN result_json ELSE "
+                "JSON_MODIFY(COALESCE(result_json,'{}'),'$.reply_message_id',?) END, "
                 "payload_json=JSON_MODIFY(payload_json,'$.question',NULL), "
                 "updated_at=SYSUTCDATETIME() WHERE job_id=? AND app_id=? AND tenant_key=? "
                 "AND status IN ('analyzing','sending')",
                 status,
                 error_code,
+                reply_message_id,
+                reply_message_id,
                 job_id,
                 self.app_id,
                 self.tenant_key,

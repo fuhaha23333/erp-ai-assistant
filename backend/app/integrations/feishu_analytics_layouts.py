@@ -2,6 +2,7 @@
 
 from app.analysis.operations import DOMAIN_LABELS
 from app.analysis.sales_query import _label
+from app.integrations import feishu_business_display as business
 from app.integrations.feishu_display_components import amount, chart, indicators, percent, text
 
 RANKINGS = {"product_ranking", "buyer_ranking"}
@@ -96,36 +97,9 @@ def result_chart(step, result, row_limit: int) -> dict | None:
 def details(
     step, result, currency: str, row_limit: int
 ) -> tuple[list[tuple[str, str]], list[dict]]:
-    if result.kind == "margin":
-        columns = [
-            (key, result.columns[key])
-            for key in (
-                "name",
-                "comparison",
-                "current_profit",
-                "previous_profit",
-                "delta",
-                "unit",
-            )
-        ]
-    elif result.kind == "price":
-        columns = [
-            (key, result.columns[key])
-            for key in (
-                "name",
-                "comparison",
-                "previous_price",
-                "current_price",
-                "delta",
-                "unit",
-            )
-        ]
-    elif result.kind == "growth":
-        columns = [
-            (key, result.columns[key])
-            for key in ("name", "comparison", "delta", "change_percent", "unit", "record_state")
-        ]
-    elif result.domain != "sales":
+    if result.kind in business.KINDS:
+        return business.details(step, result, currency, row_limit)
+    if result.domain != "sales":
         columns = [
             (key, label)
             for key, label in result.columns.items()

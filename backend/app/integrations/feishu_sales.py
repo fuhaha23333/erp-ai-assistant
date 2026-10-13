@@ -104,6 +104,11 @@ class SalesBot:
         # No source/model calls here. Commit before acknowledging the SDK event.
         return self.store.enqueue(identity, payload)
 
+    def accept_card_action(self, data):
+        from app.integrations.feishu_card_actions import accept
+
+        return accept(self, data)
+
     @staticmethod
     def _intent_payload(intent):
         return {
@@ -141,6 +146,7 @@ class SalesBot:
             "analysis_planning",
             "analysis",
             "semantic_notice",
+            "card_action",
         }:
             from app.integrations.feishu_analytics import answer_analysis
 
@@ -237,15 +243,18 @@ class SalesBot:
             return 0
         try:
             card = outgoing.get("result", {}).get("reply_card")
+            reply_to = outgoing["payload"].get("reply_to_message_id", outgoing["message_id"])
             if card is not None and card_sender is not None:
-                card_sender(outgoing["message_id"], card, outgoing["request_id"])
+                receipt = card_sender(reply_to, card, outgoing["request_id"])
             else:
-                sender(outgoing["message_id"], outgoing["reply_text"], outgoing["request_id"])
+                receipt = sender(reply_to, outgoing["reply_text"], outgoing["request_id"])
         except ReplyRejected as exc:
             self.store.mark(outgoing["job_id"], "rejected", error_code=exc.code)
         except Exception:
             self.store.mark(outgoing["job_id"], "unknown")
         else:
-            self.store.mark(outgoing["job_id"], "sent")
+            self.store.mark(outgoing["job_id"], "sent", **(
+                {"reply_message_id": receipt} if isinstance(receipt, str) else {}
+            ))
             return 1
         return 0

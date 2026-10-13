@@ -114,15 +114,15 @@ def probe_bot(client) -> str:
         raise AppConfigError("无法验证机器人身份，请检查网络、应用凭据及机器人能力") from None
 
 
-def reply_text(client, message_id: str, text: str, request_id: str) -> None:
-    _reply(client, message_id, 'text', {'text': text}, request_id)
+def reply_text(client, message_id: str, text: str, request_id: str) -> str:
+    return _reply(client, message_id, 'text', {'text': text}, request_id)
 
 
-def reply_card(client, message_id: str, card: dict, request_id: str) -> None:
-    _reply(client, message_id, 'interactive', card, request_id)
+def reply_card(client, message_id: str, card: dict, request_id: str) -> str:
+    return _reply(client, message_id, 'interactive', card, request_id)
 
 
-def _reply(client, message_id: str, msg_type: str, content: dict, request_id: str) -> None:
+def _reply(client, message_id: str, msg_type: str, content: dict, request_id: str) -> str:
     from lark_oapi.api.im.v1 import ReplyMessageRequest, ReplyMessageRequestBody
 
     request = (ReplyMessageRequest.builder().message_id(message_id)
@@ -136,6 +136,7 @@ def _reply(client, message_id: str, msg_type: str, content: dict, request_id: st
         raise AppConfigError("回复未获成功确认，请核实群内消息和发消息权限")
     if not getattr(getattr(response, "data", None), "message_id", None):
         raise AppConfigError("回复缺少消息回执，请在群内核实")
+    return response.data.message_id
 
 
 def extract_group_message(data, app_id: str, bot_id: str):

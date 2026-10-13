@@ -3,17 +3,46 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from app.analysis.sales_query import _label
+from app.integrations import feishu_business_display as business
 from app.schemas.analytics import AnalysisResponse
 
 
 def _blocks(
-    response: AnalysisResponse, row_limit: int, conversation_notice: str | None = None
+    response: AnalysisResponse,
+    row_limit: int,
+    conversation_notice: str | None = None,
+    *,
+    expanded: bool = True,
 ) -> list[str]:
     blocks = ["本次问题理解\n" + "\n".join(response.interpretation)]
     for step, result in zip(response.plan.steps, response.results, strict=True):
         text = [
             f"{result.title} · {step.start_date} 至 {step.end_date_exclusive - timedelta(days=1)}"
         ]
+        if result.kind in business.KINDS:
+            text.append(business.overview(step, result, response.provenance.currency))
+            if expanded and result.rows:
+                text.append(
+                    business.expanded_details(result, row_limit, response.provenance.currency)
+                )
+            elif result.rows:
+                columns, rows = business.details(
+                    step, result, response.provenance.currency, row_limit
+                )
+                text.extend(
+                    "；".join(f"{label}：{row[key]}" for key, label in columns) for row in rows
+                )
+                text.append("组合结果超过卡片容量；逐项详细数据请单独询问该主题或在网页查看。")
+            else:
+                text.append("当前方向和排序条件下没有明细；完整范围统计见概览。")
+            if len(result.rows) > row_limit:
+                text.append(
+                    f"卡片节选 {row_limit} 行，本次返回 {len(result.rows)} 行；"
+                    "部分明细未展示，概览不受节选影响。完整明细请在网页查看或下载。"
+                )
+            text.extend(result.notes)
+            blocks.append("\n".join(text))
+            continue
         text.extend(result.findings)
         if result.kind == "comparison":
             rate = result.totals["change_rate"]

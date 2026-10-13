@@ -149,11 +149,32 @@ def main(argv=None) -> int:
                 except Exception:
                     print("机器人任务暂未完成，请检查助手库、本地配置和状态。", flush=True)
 
-        handler = (
+        handler_builder = (
             lark.EventDispatcherHandler.builder("", "")
             .register_p2_im_message_receive_v1(receive)
-            .build()
         )
+        if args.sales:
+            from lark_oapi.event.callback.model.p2_card_action_trigger import (
+                P2CardActionTriggerResponse,
+            )
+
+            def card_action(data):
+                try:
+                    status = bot.accept_card_action(data)
+                except Exception:
+                    status = "failed"
+                message = {
+                    "queued": "已收到，分析完成后会发送新的结果卡。",
+                    "duplicate": "这项操作已经提交，请查看最近的结果。",
+                    "busy": "已有查询处理中，请等待结果。",
+                }.get(status, "操作未受理，请重新 @机器人提问。")
+                return P2CardActionTriggerResponse({"toast": {
+                    "type": "info" if status in {"queued", "duplicate"} else "warning",
+                    "content": message,
+                }})
+
+            handler_builder.register_p2_card_action_trigger(card_action)
+        handler = handler_builder.build()
         # One connection process per app/local state directory; no competing consumers.
         with delivery_lock(state_dir / "connection.lock"):
             if store is not None:

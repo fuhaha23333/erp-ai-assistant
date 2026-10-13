@@ -6,18 +6,30 @@ No ERP access, model calls, credentials, or message sends.
 
 import html
 import json
+import os
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "backend"))
+os.environ["ERP_ENV_FILE"] = str(ROOT / "backend/tests/.env.test-not-present")
+os.environ["ERP_CONTEXT_SIGNING_KEY"] = "ab" * 32  # Public synthetic preview key.
 
 from app.analysis.analytics import execute_analysis
 from app.analysis.sales import analyze_sales
 from app.core.business_rules import load_business_rules
 from app.integrations.feishu_analytics_cards import render_analysis
 from app.schemas.analytics import AnalysisPlan
-from tests.conftest import extract, scope, source_as_of, window
+from tests.conftest import (
+    extract,
+    growth_report,
+    margin_report,
+    multi_report,
+    risk_report,
+    scope,
+    source_as_of,
+    window,
+)
 
 OUTPUT = ROOT / ".local" / "feishu-display"
 
@@ -87,15 +99,62 @@ def fixtures():
     unknown = results["product_ranking"].model_copy(deep=True)
     unknown.results[0] = unknown.results[0].model_copy(update={"kind": "future_kind"})
     results["generic"] = unknown
+    business_report = risk_report.__wrapped__(
+        margin_report.__wrapped__(
+            growth_report.__wrapped__(
+                multi_report.__wrapped__(
+                    extract.__wrapped__(),
+                    window.__wrapped__(),
+                    scope.__wrapped__(),
+                    source_as_of.__wrapped__(),
+                )
+            )
+        )
+    )
+    for kind, metric in (
+        ("growth", "amount"),
+        ("price", "unit_price"),
+        ("margin", "gross_profit"),
+        ("inventory_risk", "stock"),
+        ("stocking", "stock"),
+    ):
+        step = dict(
+            domain="shipping",
+            kind=kind,
+            metric=metric,
+            start_date="2026-08-01",
+            end_date_exclusive="2026-09-01",
+        )
+        if kind == "inventory_risk":
+            step.update(
+                domain="inventory", start_date="2026-09-16", end_date_exclusive="2026-09-17"
+            )
+        elif kind == "stocking":
+            step.update(
+                domain="inventory", start_date="2026-09-17", end_date_exclusive="2026-09-24"
+            )
+        results[kind] = execute_analysis(business_report, AnalysisPlan(steps=[step]))
+    quantity = results["growth"].plan.steps[0].model_copy(update={"metric": "quantity"})
+    results["growth_quantity"] = execute_analysis(business_report, AnalysisPlan(steps=[quantity]))
+    results["business_combined"] = results["growth"].model_copy(
+        update={
+            "plan": AnalysisPlan(
+                steps=[
+                    results[k].plan.steps[0]
+                    for k in ("growth", "price", "margin", "inventory_risk", "stocking")
+                ]
+            ),
+            "results": [
+                results[k].results[0]
+                for k in ("growth", "price", "margin", "inventory_risk", "stocking")
+            ],
+        }
+    )
     return results
 
 
 def safe_json(value):
-    return (
-        json.dumps(value, ensure_ascii=False)
-        .replace("<", "\\u003c")
-        .replace("&", "\\u0026")
-    )
+    return json.dumps(value, ensure_ascii=False).replace("<", "\\u003c").replace("&", "\\u0026")
 
 
 def content(node):
@@ -136,10 +195,13 @@ def render(node):
         )
     if tag == "chart":
         return (
-            '<div class="chart"><script type="application/json">'
+            '<div class="chart" style="height:' + html.escape(node.get("height", "240px"))
+            + '"><script type="application/json">'
             + safe_json(node["chart_spec"])
             + "</script></div>"
         )
+    if tag == "button":
+        return '<button type="button" class="card-action">' + content(node["text"]) + '</button>'
     raise ValueError(tag)
 
 
@@ -176,7 +238,14 @@ window.chartReady=Promise.all([...document.querySelectorAll('.chart')].map(async
 def main():
     OUTPUT.mkdir(parents=True, exist_ok=True)
     for name, response in fixtures().items():
-        card, _ = render_analysis(response)
+        from app.integrations.feishu_card_actions import controls, definitions
+
+        # Synthetic identity/key only. Preview never uses the developer's .env or sends events.
+        actions = controls(definitions(response), {
+            "job_id": "a" * 64, "app_id": "cli_preview", "tenant_key": "tenant-preview",
+            "chat_id": "oc_preview", "user_open_id": "ou_preview",
+        })
+        card, _ = render_analysis(response, action_elements=actions)
         (OUTPUT / f"{name}.json").write_text(
             json.dumps(card, ensure_ascii=False, indent=2), encoding="utf-8"
         )
@@ -192,9 +261,7 @@ def main():
             + "</script></html>"
         )
         (OUTPUT / f"{name}.html").write_text(page, encoding="utf-8")
-    print(
-        f"Generated {len(fixtures())} synthetic card fixtures in .local/feishu-display"
-    )
+    print(f"Generated {len(fixtures())} synthetic card fixtures in .local/feishu-display")
 
 
 if __name__ == "__main__":
